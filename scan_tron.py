@@ -2,15 +2,13 @@
 import os
 import json
 import requests
-from mythril.mythril import Mythril
-from detector import OwnershipTakeoverDetector
+import subprocess
 
-# ─── CONFIG ───────────────────────────────────────────────
+# --- CONFIG ---
 TRONSCAN_API_KEY = os.environ.get("TRONSCAN_API_KEY", "")
 TRONSCAN_API = "https://apilist.tronscanapi.com/api/contracts"
 HEADERS = {"TRON-PRO-API-KEY": TRONSCAN_API_KEY} if TRONSCAN_API_KEY else {}
 
-# ─── FETCH CONTRACTS ──────────────────────────────────────
 def fetch_recent_contracts(limit=5):
     params = {
         "verified-only": "true",
@@ -32,80 +30,97 @@ def fetch_bytecode(address):
     data = r.json().get("data", [{}])[0]
     return data.get("bytecode")
 
-# ─── RUN MYTHRIL ──────────────────────────────────────────
 def analyze_bytecode(bytecode):
-    # Initialize Mythril with the custom plugin
-    mythril = Mythril(
-        solc_version=None,
-        dynld=False,
-        onchain_storage_access=True,
-        enable_plugins=[OwnershipTakeoverDetector()]
-    )
+    """Calls the myth CLI tool to analyze the bytecode."""
+    if not bytecode:
+        return None
     
-    # Run symbolic execution
-    mythril.fire_lasers(
-        contract=None,
-        bytecode=bytecode,
-        max_depth=128,
-        execution_timeout=120,
-    )
+    # Use the myth command-line tool
+    command = [
+        "myth", "analyze",
+        "-c", bytecode,
+        "--execution-timeout", "60",
+        "-o", "json"
+    ]
     
-    # Collect issues
-    issues = mythril.execution_info.get_issues()
-    return issues
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=120
+        )
+        return json.loads(result.stdout)
+    except subprocess.CalledProcessError as e:
+        print(f"Mythril analysis failed: {e.stderr}")
+        return None
+    except json.JSONDecodeError:
+        print("Failed to parse Mythril JSON output.")
+        return None
+    except subprocess.TimeoutExpired:
+        print("Mythril analysis timed out.")
+        return None
 
-# ─── MAIN AUTOMATED LOOP ──────────────────────────────────
+def is_ownership_risk(mythril_results):
+    """Heuristic to check for ownership/access control risks."""
+    if not mythril_results:
+        return False
+    
+    # SWC IDs for access control issues
+    risk_swc_ids = {"SWC-105", "SWC-106", "SWC-115"}
+    
+    for issue in mythril_results:
+        for problem in issue.get("issues", []):
+            swc_id = problem.get("swc-id")
+            if swc_id in risk_swc_ids:
+                return True
+    return False
+
 def main():
-    print("🔍 Starting automated TRON ownership takeover scan...")
+    print("🔍 Starting automated TRON ownership scan...")
     contracts = fetch_recent_contracts(limit=5)
-
+    
     if not contracts:
-        print("No contracts found to analyze.")
+        print("No contracts found.")
         return
 
     vulnerable_contracts = []
-
+    
     for contract in contracts:
         address = contract.get("address")
         name = contract.get("name", "Unknown")
         print(f"\n--- Analyzing: {name} ({address}) ---")
-
+        
         bytecode = fetch_bytecode(address)
         if not bytecode:
-            print("  ⚠️ Skipping: No bytecode.")
+            print("  ⚠️ No bytecode.")
             continue
-
+            
         print("  🛠️ Running Mythril...")
-        try:
-            issues = analyze_bytecode(bytecode)
-        except Exception as e:
-            print(f"  ⚠️ Analysis failed: {e}")
+        results = analyze_bytecode(bytecode)
+        
+        if results is None:
+            print("  ⚠️ Analysis failed.")
             continue
-
-        if issues:
-            print(f"  🚨 FOUND {len(issues)} ISSUE(S)!")
-            for issue in issues:
-                print(f"     - {issue.title}: {issue.description_head}")
-            vulnerable_contracts.append({
-                "address": address,
-                "name": name,
-                "issues": [i.title for i in issues]
-            })
+            
+        if is_ownership_risk(results):
+            print("  🚨 HIGH RISK: Potential access control issue detected!")
+            vulnerable_contracts.append({"name": name, "address": address})
         else:
-            print("  ✅ No ownership takeover issues detected.")
+            print("  ✅ No ownership risks detected.")
 
-    # ─── FINAL REPORT ─────────────────────────────────────
-    print("\n" + "=" * 50)
+    # --- Final Report ---
+    print("\n" + "="*40)
     print("FINAL SCAN REPORT")
-    print("=" * 50)
+    print("="*40)
     if vulnerable_contracts:
         print(f"Found {len(vulnerable_contracts)} vulnerable contract(s):")
-        for v in vulnerable_contracts:
-            print(f"  - {v['name']}: {v['address']}")
+        for c in vulnerable_contracts:
+            print(f"  - {c['name']}: {c['address']}")
     else:
-        print("No ownership takeover vulnerabilities found in this batch.")
+        print("No vulnerabilities found.")
 
-    # Save to file for your dashboard
     with open("vulnerable_contracts.json", "w") as f:
         json.dump(vulnerable_contracts, f, indent=2)
     print("\nResults saved to vulnerable_contracts.json")
