@@ -1,0 +1,42 @@
+name: TRON Mythril Ownership Scanner
+
+on:
+  # Allows you to run this workflow manually from the Actions tab
+  workflow_dispatch:
+  
+  # Runs automatically every day at 00:00 UTC
+  schedule:
+    - cron: '0 0 * * *'
+
+jobs:
+  scan-contracts:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          # Mythril requires solc (Solidity compiler) for some operations
+          wget https://github.com/ethereum/solidity/releases/download/v0.8.19/solc-static-linux
+          chmod +x solc-static-linux
+          sudo mv solc-static-linux /usr/local/bin/solc
+
+      - name: Run Mythril Scanner
+        env:
+          TRONSCAN_API_KEY: ${{ secrets.TRONSCAN_API_KEY }}
+        run: python scan_tron.py
+
+      - name: Upload Scan Results
+        uses: actions/upload-artifact@v4
+        with:
+          name: vulnerable-contracts-report
+          path: vulnerable_contracts.json
