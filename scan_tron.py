@@ -3,8 +3,8 @@ import os
 import json
 import requests
 import subprocess
+import tempfile
 
-# --- CONFIG ---
 TRONSCAN_API_KEY = os.environ.get("TRONSCAN_API_KEY", "")
 TRONSCAN_API = "https://apilist.tronscanapi.com/api/contracts"
 HEADERS = {"TRON-PRO-API-KEY": TRONSCAN_API_KEY} if TRONSCAN_API_KEY else {}
@@ -24,40 +24,55 @@ def fetch_recent_contracts(limit=5):
     return r.json().get("data", [])
 
 def fetch_source_code(address):
-    """Fetches the Solidity source code instead of bytecode."""
     url = f"https://apilist.tronscanapi.com/api/contract?contract={address}"
     r = requests.get(url, headers=HEADERS)
     r.raise_for_status()
     data = r.json().get("data", [{}])[0]
-    
-    # Tronscan sometimes returns source code as a JSON string if there are multiple files.
-    # We will just grab the main code string.
     source = data.get("code")
     if source and source.startswith("{"):
         try:
             parsed = json.loads(source)
-            # Grab the content of the first file in the JSON
             source = list(parsed.get("sources", {}).values())[0].get("content", "")
         except:
             pass
     return source
 
-def analyze_source_code(source_code):
-    """Writes the Solidity code to a file and runs Mythril via Docker."""
+def compile_source_to_bytecode(source_code):
+    """Compiles Solidity source using solc to raw bytecode."""
     if not source_code:
         return None
 
-    # Mythril needs a file to analyze
-    temp_file = "temp_contract.sol"
-    with open(temp_file, "w") as f:
+    with tempfile.NamedTemporaryFile(suffix=".sol", mode="w", delete=False) as f:
         f.write(source_code)
+        temp_path = f.name
+
+    try:
+        # Use solc to compile to binary
+        result = subprocess.run(
+            ["solc", "--bin", temp_path],
+            capture_output=True, text=True, check=True
+        )
+        # solc output format: "======= <file> =======\nBinary: <hex>"
+        lines = result.stdout.strip().split("\n")
+        for i, line in enumerate(lines):
+            if line.strip().endswith("Binary:") or "Binary:" in line:
+                return lines[i+1].strip()
+        return None
+    except subprocess.CalledProcessError as e:
+        print(f"  ⚠️ solc compilation failed: {e.stderr}")
+        return None
+    finally:
+        os.remove(temp_path)
+
+def analyze_bytecode(bytecode):
+    if not bytecode:
+        return None
 
     command = [
         "docker", "run", "--rm",
-        "-v", f"{os.getcwd()}:/workspace",
-        "-w", "/workspace",
         "mythril/myth",
-        "myth", "analyze", temp_file,
+        "myth", "analyze",
+        "-c", bytecode,
         "--execution-timeout", "60",
         "-o", "json"
     ]
@@ -76,9 +91,6 @@ def analyze_source_code(source_code):
     except subprocess.TimeoutExpired:
         print("  ⚠️ Mythril analysis timed out.")
         return None
-    finally:
-        if os.path.exists(temp_file):
-            os.remove(temp_file)
 
 def is_ownership_risk(mythril_results):
     if not mythril_results:
@@ -110,8 +122,14 @@ def main():
             print("  ⚠️ No source code available.")
             continue
 
-        print("  🛠️ Running Mythril on source code...")
-        results = analyze_source_code(source)
+        print("  🛠️ Compiling source to bytecode...")
+        bytecode = compile_source_to_bytecode(source)
+        if not bytecode:
+            print("  ⚠️ Compilation failed.")
+            continue
+
+        print("  🛠️ Running Mythril on bytecode...")
+        results = analyze_bytecode(bytecode)
 
         if results is None:
             print("  ⚠️ Analysis failed.")
