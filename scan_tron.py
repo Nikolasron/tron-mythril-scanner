@@ -4,10 +4,13 @@ import json
 import requests
 import subprocess
 import tempfile
+from solcx import install_solc, compile_standard
 
+# --- CONFIG ---
 TRONSCAN_API_KEY = os.environ.get("TRONSCAN_API_KEY", "")
 TRONSCAN_API = "https://apilist.tronscanapi.com/api/contracts"
 HEADERS = {"TRON-PRO-API-KEY": TRONSCAN_API_KEY} if TRONSCAN_API_KEY else {}
+SOLC_VERSION = "0.8.19"  # Specify a stable version
 
 def fetch_recent_contracts(limit=5):
     params = {
@@ -29,6 +32,7 @@ def fetch_source_code(address):
     r.raise_for_status()
     data = r.json().get("data", [{}])[0]
     source = data.get("code")
+    # Handle JSON-formatted source code
     if source and source.startswith("{"):
         try:
             parsed = json.loads(source)
@@ -38,31 +42,32 @@ def fetch_source_code(address):
     return source
 
 def compile_source_to_bytecode(source_code):
-    """Compiles Solidity source using solc to raw bytecode."""
+    """Compiles Solidity source using solcx to raw bytecode."""
     if not source_code:
         return None
 
-    with tempfile.NamedTemporaryFile(suffix=".sol", mode="w", delete=False) as f:
-        f.write(source_code)
-        temp_path = f.name
-
     try:
-        # Use solc to compile to binary
-        result = subprocess.run(
-            ["solc", "--bin", temp_path],
-            capture_output=True, text=True, check=True
+        # Install solc if not already installed
+        install_solc(SOLC_VERSION)
+        
+        # Compile the source
+        compiled = compile_standard(
+            {
+                "language": "Solidity",
+                "sources": {"contract.sol": {"content": source_code}},
+                "settings": {"outputSelection": {"*": {"*": ["evm.bytecode.object"]}}},
+            },
+            solc_version=SOLC_VERSION,
         )
-        # solc output format: "======= <file> =======\nBinary: <hex>"
-        lines = result.stdout.strip().split("\n")
-        for i, line in enumerate(lines):
-            if line.strip().endswith("Binary:") or "Binary:" in line:
-                return lines[i+1].strip()
+        
+        # Extract bytecode
+        bytecode = compiled["contracts"]["contract.sol"]
+        for contract_name, contract_data in bytecode.items():
+            return contract_data["evm"]["bytecode"]["object"]
         return None
-    except subprocess.CalledProcessError as e:
-        print(f"  ⚠️ solc compilation failed: {e.stderr}")
+    except Exception as e:
+        print(f"  ⚠️ Compilation failed: {e}")
         return None
-    finally:
-        os.remove(temp_path)
 
 def analyze_bytecode(bytecode):
     if not bytecode:
