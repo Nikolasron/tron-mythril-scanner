@@ -31,18 +31,20 @@ def fetch_bytecode(address):
     return data.get("bytecode")
 
 def analyze_bytecode(bytecode):
-    """Calls the myth CLI tool to analyze the bytecode."""
+    """Calls Mythril via Docker to analyze the bytecode."""
     if not bytecode:
         return None
-    
-    # Use the myth command-line tool
+
+    # Use Docker to run Mythril, avoiding dependency hell
     command = [
+        "docker", "run", "--rm",
+        "mythril/myth",
         "myth", "analyze",
         "-c", bytecode,
         "--execution-timeout", "60",
         "-o", "json"
     ]
-    
+
     try:
         result = subprocess.run(
             command,
@@ -66,44 +68,41 @@ def is_ownership_risk(mythril_results):
     """Heuristic to check for ownership/access control risks."""
     if not mythril_results:
         return False
-    
-    # SWC IDs for access control issues
+
     risk_swc_ids = {"SWC-105", "SWC-106", "SWC-115"}
-    
     for issue in mythril_results:
         for problem in issue.get("issues", []):
-            swc_id = problem.get("swc-id")
-            if swc_id in risk_swc_ids:
+            if problem.get("swc-id") in risk_swc_ids:
                 return True
     return False
 
 def main():
     print("🔍 Starting automated TRON ownership scan...")
     contracts = fetch_recent_contracts(limit=5)
-    
+
     if not contracts:
         print("No contracts found.")
         return
 
     vulnerable_contracts = []
-    
+
     for contract in contracts:
         address = contract.get("address")
         name = contract.get("name", "Unknown")
         print(f"\n--- Analyzing: {name} ({address}) ---")
-        
+
         bytecode = fetch_bytecode(address)
         if not bytecode:
             print("  ⚠️ No bytecode.")
             continue
-            
-        print("  🛠️ Running Mythril...")
+
+        print("  🛠️ Running Mythril via Docker...")
         results = analyze_bytecode(bytecode)
-        
+
         if results is None:
             print("  ⚠️ Analysis failed.")
             continue
-            
+
         if is_ownership_risk(results):
             print("  🚨 HIGH RISK: Potential access control issue detected!")
             vulnerable_contracts.append({"name": name, "address": address})
